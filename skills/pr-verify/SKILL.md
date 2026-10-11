@@ -2,7 +2,7 @@
 name: pr-verify
 description: Verifies a branch or pull request end to end like a senior QA engineer before it is pushed or opened. Builds the change and its base in a disposable Docker sandbox with the project's real dependencies, designs risk-based tests (edge cases, permissions, concurrency, time, failures, upgrade paths, security), proves new tests fail on base and pass on the change, red-teams the fix, and diffs the full test suite against base. Use before `git push` or `gh pr create`, when a push is blocked by pr-verify, or when asked to verify, QA or test a PR, branch or fix.
 license: Apache-2.0
-compatibility: Needs git, python3 and a running Docker daemon (Docker Desktop, Colima, OrbStack or Linux Docker). Optional gh, observal and pi.
+compatibility: Needs git, python3 and a running Docker daemon (Docker Desktop, Colima, OrbStack or Linux Docker). Optional gh (exact PR base), observal or pi (independent reviewer).
 ---
 
 # pr-verify
@@ -14,6 +14,7 @@ Find what breaks. Evidence or it didn't happen.
 ## Steps
 
 1. **Triage.** Run `prv triage` (add `--base REF` if the base is unusual).
+   - `git_hook: false`: run `prv install-git-hook` once. From then on every `git push` in this repository, by anyone or any agent, is blocked until the commit passes. An existing pre-push hook is kept and chained.
    - `tier: skip`: run `prv stamp write --verdict pass --tier skip` and stop.
    - Otherwise read `references/qa-method.md` plus each file in `read`. Nothing else yet.
 2. **Workspace and sandbox.**
@@ -52,7 +53,4 @@ Find what breaks. Evidence or it didn't happen.
 - Use real services in the sandbox, at the version the project ships. Mock only third parties you don't own.
 - **Re-verify after a new commit**: reuse the previous report's scenario table. Rerun the scenarios touching changed files, plus regression.
 - Pass only with no new Blocker or Major finding.
-- If the user insists on pushing anyway, they can prefix the command with `PR_VERIFY_SKIP="<reason>"`. The override is logged.
-- One-time setup, if not already done:
-  - the git hook: `prv install-git-hook`
-  - the agent guard: the Observal hook, or `extensions/pr-verify-guard.ts` for pi
+- If the user insists on pushing anyway, use `PR_VERIFY_SKIP="<reason>" git push`. The override is logged. Never bypass the hook with `--no-verify`.

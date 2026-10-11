@@ -10,21 +10,20 @@ pr-verify builds the change **and its base** in a disposable Docker sandbox with
 - has an independent reviewer try to break it
 - diffs the full suite against base, so only *new* failures block
 
-A guard blocks `git push` and `gh pr create` until the commit has passed.
+A git pre-push hook, installed by the skill on its first run in a repository, blocks pushes until the commit has passed.
 
 It works with any language or stack that runs in Linux containers, and with any agent harness that loads [Agent Skills](https://agentskills.io).
 
 ## What's in the box
 
+It is **one skill**. Everything ships in `skills/pr-verify/`:
+
 | Path | What it is |
 |---|---|
-| `skills/pr-verify/SKILL.md` | The method (~1.4k tokens; loaded when the skill triggers) |
-| `skills/pr-verify/references/` | QA checklist, per-area probes (auth, data, concurrency and time, API, UI, security, config), report template, reviewer prompt. Loaded only when the diff touches that area |
-| `skills/pr-verify/scripts/prv.py` | Plumbing CLI (Python stdlib only). Every command prints one JSON line; logs stay on disk |
-| `skills/pr-verify/sandbox/` | The sandbox image: Ubuntu with its own Docker daemon. Toolchains install on demand via mise/uv/corepack into a cache volume |
-| `extensions/pr-verify-guard.ts` | Guard for pi |
-| `hooks/pr-verify-guard.sh` | Guard for Claude Code (`PreToolUse`) |
-| `observal/` | Observal component files: hook, sandbox, and the `pr-verify-reviewer` agent |
+| `SKILL.md` | The method (~1.4k tokens; loaded when the skill triggers) |
+| `references/` | QA checklist, per-area probes (auth, data, concurrency and time, API, UI, security, config), report template, reviewer prompt. Loaded only when the diff touches that area |
+| `scripts/prv.py` | Plumbing CLI (Python stdlib only). Every command prints one JSON line; logs stay on disk. Also the git pre-push guard |
+| `sandbox/` | The sandbox image: Ubuntu with its own Docker daemon. Built locally on first use. Toolchains install on demand via mise/uv/corepack into a cache volume |
 
 ## How a run goes
 
@@ -53,35 +52,25 @@ Measured on a real PR (Observal #1836, deep tier):
 
 ## Install
 
-Requirements: git, python3 ≥ 3.9, and a running Docker daemon (Docker Desktop, Colima, OrbStack or Linux Docker). Optional: `gh` (exact PR base detection, including forks), `observal`, `pi`.
+Requirements: git, python3 ≥ 3.9, and a running Docker daemon (Docker Desktop, Colima, OrbStack or Linux Docker). Optional: `gh` (exact PR base detection, including forks), and `observal` or `pi` for the independent reviewer.
 
-**pi** (skill and guard together):
+Install the `skills/pr-verify` folder wherever your harness loads skills. For example:
+- **Observal:** `observal registry skill install pr-verify`
+- **pi:** `~/.pi/agent/skills/`
+- **Claude Code:** `~/.claude/skills/`
+- **Codex and others:** `~/.agents/skills/`
 
-```bash
-pi install git:github.com/OWNER/pr-verify
-```
-
-**Observal** (any supported harness): `observal agent pull pr-verify` once it's published (see below). Or install pieces with `observal registry skill install …` and `observal registry hook install …`.
-
-**Claude Code, manually:** copy `skills/pr-verify` to `~/.claude/skills/`, and add the guard to `~/.claude/settings.json`:
-
-```json
-{ "hooks": { "PreToolUse": [ { "matcher": "Bash", "hooks": [ { "type": "command", "command": "sh /path/to/pr-verify/hooks/pr-verify-guard.sh", "timeout": 30 } ] } ] } }
-```
-
-**Any terminal push** (also covers you, not just agents), run once per repository:
-
-```bash
-python3 ~/.claude/skills/pr-verify/scripts/prv.py install-git-hook   # chains an existing pre-push hook
-```
+That's all. On its first run in a repository, the skill installs the push guard.
 
 ## The guard
 
-- Blocks `git push` and `gh pr create` unless the commit has a passing stamp.
-- Docs-only changes, dry runs and branch deletions pass through.
+The guard is a plain git `pre-push` hook (`prv install-git-hook`). Because git runs it, it applies to every push in the repository: yours in a terminal, and any agent's in any harness.
+
+- Blocks the push unless every commit being pushed has a passing stamp.
+- Docs-only changes and branch deletions pass through. An existing pre-push hook (for example from pre-commit) is kept and chained.
 - A new commit needs a new verification (re-runs reuse the previous scenario table).
 - Override when you must: `PR_VERIFY_SKIP="hotfix for outage" git push`. Overrides are logged to `.git/pr-verify/overrides.log`.
-- It's a quality gate, not a security boundary. If the skill isn't installed, or the guard itself errors, it warns and lets the push through.
+- It's a quality gate, not a security boundary: `git push --no-verify` skips all git hooks. The skill tells agents never to do that.
 
 ## Configuration
 
@@ -92,7 +81,6 @@ python3 ~/.claude/skills/pr-verify/scripts/prv.py install-git-hook   # chains an
 | `PR_VERIFY_MEMORY`, `PR_VERIFY_CPUS` | unlimited | Sandbox limits |
 | `PR_VERIFY_REVIEWER` | none | Observal agent for the independent review |
 | `PR_VERIFY_MODEL` | calling pi model | Model for the isolated pi reviewer |
-| `PR_VERIFY_SKILL_DIR` | auto | Skill location for the hook script |
 
 ## Security notes
 
@@ -102,14 +90,15 @@ python3 ~/.claude/skills/pr-verify/scripts/prv.py install-git-hook   # chains an
 
 ## Publishing to Observal
 
-1. Push this repository to GitHub, and publish the sandbox image: `docker buildx build --platform linux/amd64,linux/arm64 -t ghcr.io/OWNER/pr-verify-sandbox:0.1.0 --push skills/pr-verify/sandbox`. Then set `image` in `observal/sandbox.json`.
-2. Submit the components:
-   ```bash
-   observal registry skill submit --skill-md skills/pr-verify/SKILL.md --git-url https://github.com/OWNER/pr-verify --git-ref main --skill-path skills/pr-verify --name pr-verify --description "…" --task-type testing --output json
-   observal registry hook submit --from-file observal/hook.json --output json
-   observal registry sandbox submit --from-file observal/sandbox.json --output json
-   ```
-3. Publish the reviewer agent from `observal/reviewer/` (`observal agent publish`). Then bundle everything as the `pr-verify` agent, so one `observal agent pull` installs all of it.
+Push this repository to GitHub, then submit the one skill:
+
+```bash
+observal registry skill submit --skill-md skills/pr-verify/SKILL.md --git-url https://github.com/OWNER/pr-verify \
+  --git-ref main --skill-path skills/pr-verify --name pr-verify --task-type testing \
+  --description "Senior-QA end-to-end verification of a PR in a Docker sandbox; blocks pushes until verified." --output json
+```
+
+Optional: if your team publishes its own reviewer agent, set `PR_VERIFY_REVIEWER` to its identifier. The skill then delegates the independent review to it through Observal.
 
 ## Development
 

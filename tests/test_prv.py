@@ -133,65 +133,18 @@ class TestCiSteps(unittest.TestCase):
         self.assertEqual(prv._run_blocks(yaml), ["uv sync", "make lint && make test", "pytest tests -n auto"])
 
 
-class TestGuard(RepoCase):
-    def test_non_push_and_dry_runs_pass(self):
-        self.commit("app.py", "def f():\n    return 2\n")
-        self.assertTrue(self.decide("git status")[0])
-        self.assertTrue(self.decide("git push --dry-run origin feature")[0])
-        self.assertTrue(self.decide("git push origin --delete old-branch")[0])
+class TestGitHookGuard(RepoCase):
+    """The guard as it ships: a git pre-push hook, exercised with real pushes to a bare remote."""
 
-    def test_unverified_code_is_blocked_and_stamp_unblocks(self):
-        sha = self.commit("app.py", "def f():\n    return 2\n")
-        for cmd in ("git push origin feature", "cd x && git push", "gh pr create --fill", f"git -C {self.repo} push"):
-            allowed, msg = self.decide(cmd)
-            self.assertFalse(allowed, cmd)
-            self.assertIn(sha[:10], msg)
-        d = prv.stamp_dir(str(self.repo))
-        d.mkdir(parents=True)
-        (d / f"{sha}.json").write_text(json.dumps({"sha": sha, "verdict": "fail"}))
-        self.assertIn("failed verification", self.decide("git push")[1])
-        (d / f"{sha}.json").write_text(json.dumps({"sha": sha, "verdict": "pass"}))
-        self.assertTrue(self.decide("git push")[0])
-        # a new commit needs a new verification
-        self.commit("app.py", "def f():\n    return 3\n")
-        self.assertFalse(self.decide("git push")[0])
-
-    def test_docs_only_change_is_not_blocked(self):
-        self.commit("docs/guide.md", "# guide\n")
-        self.assertTrue(self.decide("git push origin feature")[0])
-
-    def test_guard_cli_entry_points(self):
-        """Drive `prv guard` the way the hooks do: --command (pi) and hook JSON on stdin (Claude Code)."""
-        self.commit("app.py", "def f():\n    return 2\n")
-        script = str(SCRIPTS / "prv.py")
-        by_flag = subprocess.run(
-            [sys.executable, script, "guard", "--command", "git push origin feature", "--cwd", str(self.repo)],
-            capture_output=True,
-            text=True,
-        )
-        self.assertEqual(by_flag.returncode, 2, by_flag.stderr)
-        payload = json.dumps({"tool_name": "Bash", "tool_input": {"command": "git push"}, "cwd": str(self.repo)})
-        by_stdin = subprocess.run([sys.executable, script, "guard"], input=payload, capture_output=True, text=True)
-        self.assertEqual(by_stdin.returncode, 2, by_stdin.stderr)
-        self.assertIn("pr-verify", by_stdin.stderr)
-        harmless = json.dumps({"tool_name": "Bash", "tool_input": {"command": "ls"}, "cwd": str(self.repo)})
-        allowed = subprocess.run([sys.executable, script, "guard"], input=harmless, capture_output=True, text=True)
-        self.assertEqual(allowed.returncode, 0)
-
-    def test_override_is_logged(self):
-        sha = self.commit("app.py", "def f():\n    return 2\n")
-        allowed, msg = self.decide('PR_VERIFY_SKIP="hotfix for outage" git push')
-        self.assertTrue(allowed)
-        log = (prv.stamp_dir(str(self.repo)) / "overrides.log").read_text()
-        self.assertIn(sha, log)
-        self.assertIn("hotfix for outage", log)
-        self.assertTrue(self.decide("git push", env_skip="ci bot")[0])
-
-    def test_git_pre_push_hook_blocks_real_push_and_chains_existing_hook(self):
+    def setUp(self):
+        super().setUp()
         hooks = self.repo / ".git" / "hooks"
-        marker = self.tmp / "previous-hook-ran"
-        (hooks / "pre-push").write_text(f"#!/bin/sh\ntouch {marker}\n")
+        self.marker = self.tmp / "previous-hook-ran"
+        (hooks / "pre-push").write_text(f"#!/bin/sh\ntouch {self.marker}\n")
         (hooks / "pre-push").chmod(0o755)
+        self.install()
+
+    def install(self):
         cwd = os.getcwd()
         os.chdir(self.repo)
         try:
@@ -199,16 +152,65 @@ class TestGuard(RepoCase):
                 prv.cmd_install_git_hook(None)
         finally:
             os.chdir(cwd)
-        sha = self.commit("app.py", "def f():\n    return 2\n")
-        blocked = git("push", "-q", "origin", "feature", cwd=self.repo, check=False)
-        self.assertNotEqual(blocked.returncode, 0)
-        self.assertIn("has not been verified", blocked.stderr)
-        self.assertFalse(marker.exists())
+
+    def push(self, *args, env=None):
+        if env:
+            os.environ.update(env)
+        try:
+            return git("push", "-q", "origin", *(args or ("feature",)), cwd=self.repo, check=False)
+        finally:
+            for k in env or {}:
+                os.environ.pop(k, None)
+
+    def stamp(self, sha, verdict="pass"):
         d = prv.stamp_dir(str(self.repo))
-        d.mkdir(parents=True)
-        (d / f"{sha}.json").write_text(json.dumps({"sha": sha, "verdict": "pass"}))
-        git("push", "-q", "origin", "feature", cwd=self.repo)
-        self.assertTrue(marker.exists(), "the pre-existing pre-push hook must still run")
+        d.mkdir(parents=True, exist_ok=True)
+        (d / f"{sha}.json").write_text(json.dumps({"sha": sha, "verdict": verdict}))
+
+    def remote_has(self, branch):
+        return git("ls-remote", "origin", f"refs/heads/{branch}", cwd=self.repo).stdout.strip() != ""
+
+    def test_unverified_push_is_blocked_until_stamped_and_each_commit_needs_its_own_stamp(self):
+        sha = self.commit("app.py", "def f():\n    return 2\n")
+        blocked = self.push()
+        self.assertNotEqual(blocked.returncode, 0)
+        self.assertIn(f"{sha[:10]} has not been verified", blocked.stderr)
+        self.assertFalse(self.remote_has("feature"))
+        self.assertFalse(self.marker.exists(), "chained hook must not run when the guard blocks")
+
+        self.stamp(sha)
+        self.assertEqual(self.push().returncode, 0)
+        self.assertTrue(self.remote_has("feature"))
+        self.assertTrue(self.marker.exists(), "the pre-existing pre-push hook must still run")
+
+        self.commit("app.py", "def f():\n    return 3\n")
+        self.assertNotEqual(self.push().returncode, 0)
+
+    def test_failed_verdict_blocks(self):
+        sha = self.commit("app.py", "def f():\n    return 2\n")
+        self.stamp(sha, verdict="fail")
+        self.assertIn("failed verification", self.push().stderr)
+
+    def test_docs_only_change_and_branch_deletion_pass(self):
+        self.commit("docs/guide.md", "# guide\n")
+        self.assertEqual(self.push().returncode, 0)
+        self.commit("app.py", "def f():\n    return 2\n")  # unverified code on the branch now
+        self.assertEqual(self.push("--delete", "feature").returncode, 0)
+        self.assertFalse(self.remote_has("feature"))
+
+    def test_override_is_logged(self):
+        sha = self.commit("app.py", "def f():\n    return 2\n")
+        self.assertEqual(self.push(env={"PR_VERIFY_SKIP": "hotfix for outage"}).returncode, 0)
+        log = (prv.stamp_dir(str(self.repo)) / "overrides.log").read_text()
+        self.assertIn(f"{sha} hotfix for outage", log)
+
+    def test_install_is_idempotent_and_detected(self):
+        self.assertTrue(prv.git_hook_installed(str(self.repo)))
+        self.install()  # reinstalling must not chain the guard to itself
+        chained = (self.repo / ".git" / "hooks" / "pre-push.before-pr-verify").read_text()
+        self.assertNotIn("pr-verify", chained)
+        self.commit("app.py", "def f():\n    return 2\n")
+        self.assertNotEqual(self.push().returncode, 0)
 
 
 if __name__ == "__main__":

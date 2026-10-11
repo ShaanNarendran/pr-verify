@@ -85,9 +85,6 @@ AREA_REFS = {
     "config": "areas/config-deps.md",
 }
 
-PUSH_CMD = re.compile(r"(^|[;&|(]\s*|\s)(git(\s+-C\s+\S+)?\s+push\b|gh\s+pr\s+create\b)")
-SKIP_RE = re.compile(r"""PR_VERIFY_SKIP=("[^"]*"|'[^']*'|\S+)""")
-
 
 # ---------------------------------------------------------------- helpers
 
@@ -240,6 +237,7 @@ def cmd_triage(a) -> None:
             "stat": stat,
             "changed_symbols": symbols[:40],
             "read": (["qa-method.md"] + refs) if result["tier"] != "skip" else [],
+            "git_hook": git_hook_installed(),
         }
     )
 
@@ -664,29 +662,15 @@ def cmd_stamp(a) -> None:
     sys.exit(0 if record and record.get("verdict") == "pass" else 1)
 
 
-def guard_decision(command: str, cwd: str, env_skip: str | None, shas: list[str] | None = None) -> tuple[bool, str]:
-    """Return (allowed, message) for a push or PR-create command."""
-    if not PUSH_CMD.search(command):
-        return True, "not a push"
-    if re.search(r"--(dry-run|delete)\b|(\s|^)-n\b", command):
-        return True, "dry run or branch deletion"
-    target = re.search(r"git\s+-C\s+(\S+)\s+push", command)
-    if target:
-        cwd = str(Path(cwd) / os.path.expanduser(target.group(1).strip("'\"")))
-    if not ok(["git", "rev-parse", "--git-dir"], cwd=cwd):
-        return True, "not a git repository"
-    skip = SKIP_RE.search(command)
-    reason = (skip.group(1).strip("'\"") if skip else None) or env_skip
-    # shortcut: agent hooks only see the command, so they check HEAD;
-    # the git pre-push hook checks the exact SHAs being pushed.
-    shas = shas or [head_sha(cwd)]
-    if reason:
+def guard_decision(cwd: str, shas: list[str], env_skip: str | None) -> tuple[bool, str]:
+    """Return (allowed, message) for pushing these commits."""
+    if env_skip:
         d = stamp_dir(cwd)
         d.mkdir(parents=True, exist_ok=True)
         with open(d / "overrides.log", "a") as fh:
             for s in shas:
-                fh.write(f"{datetime.now(timezone.utc).isoformat(timespec='seconds')} {s} {reason}\n")
-        return True, f"override logged: {reason}"
+                fh.write(f"{datetime.now(timezone.utc).isoformat(timespec='seconds')} {s} {env_skip}\n")
+        return True, f"override logged: {env_skip}"
     missing = []
     for s in shas:
         path = stamp_dir(cwd) / f"{s}.json"
@@ -704,36 +688,32 @@ def guard_decision(command: str, cwd: str, env_skip: str | None, shas: list[str]
     s, record = missing[0]
     why = "failed verification" if record else "has not been verified"
     return False, (
-        f"pr-verify: commit {s[:10]} {why}. Run the pr-verify skill (/skill:pr-verify) before pushing or opening a PR. "
-        'To push anyway, prefix the command with PR_VERIFY_SKIP="<reason>" (the override is logged).'
+        f"pr-verify: commit {s[:10]} {why}. Run the pr-verify skill before pushing. "
+        'To push anyway: PR_VERIFY_SKIP="<reason>" git push (the override is logged). Do not use --no-verify.'
     )
 
 
 def cmd_guard(a) -> None:
-    env_skip = os.environ.get("PR_VERIFY_SKIP")
-    if a.git_pre_push is not None:
-        shas = []
-        for line in sys.stdin.read().splitlines():
-            parts = line.split()
-            if len(parts) == 4 and not set(parts[1]) <= {"0"}:
-                shas.append(parts[1])
-        if not shas:
-            sys.exit(0)
-        allowed, msg = guard_decision("git push", os.getcwd(), env_skip, shas)
-        if not allowed:
-            print(msg, file=sys.stderr)
-        sys.exit(0 if allowed else 1)
-    if a.command is not None:
-        command, cwd = a.command, a.cwd or os.getcwd()
-    else:
-        payload = json.loads(sys.stdin.read() or "{}")
-        tool = payload.get("tool_input") or payload.get("toolInput") or {}
-        command, cwd = tool.get("command") or "", payload.get("cwd") or os.getcwd()
-    allowed, msg = guard_decision(command, cwd, env_skip)
+    """git pre-push hook: stdin has one `<local ref> <local sha> <remote ref> <remote sha>` line per ref."""
+    shas = []
+    for line in sys.stdin.read().splitlines():
+        parts = line.split()
+        if len(parts) == 4 and set(parts[1]) != {"0"}:  # an all-zero local sha is a branch deletion
+            shas.append(parts[1])
+    if not shas:
+        sys.exit(0)
+    allowed, msg = guard_decision(os.getcwd(), shas, os.environ.get("PR_VERIFY_SKIP"))
     if not allowed:
         print(msg, file=sys.stderr)
-        sys.exit(2)  # Claude Code and compatible harnesses: exit 2 blocks the tool call and shows stderr to the agent
-    sys.exit(0)
+    sys.exit(0 if allowed else 1)
+
+
+def git_hook_installed(cwd=None) -> bool:
+    hook = Path(sh(["git", "rev-parse", "--git-path", "hooks"], cwd=cwd))
+    if not hook.is_absolute():
+        hook = Path(cwd or os.getcwd()) / hook
+    hook = hook / "pre-push"
+    return hook.exists() and str(Path(__file__).resolve()) in hook.read_text(errors="replace")
 
 
 def cmd_install_git_hook(a) -> None:
@@ -743,7 +723,7 @@ def cmd_install_git_hook(a) -> None:
     if hook.exists() and "pr-verify" not in hook.read_text(errors="replace"):
         hook.rename(chained)
     script = Path(__file__).resolve()
-    guard = f"python3 {shlex.quote(str(script))} guard --git-pre-push"
+    guard = f"python3 {shlex.quote(str(script))} guard"
     previous = shlex.quote(str(chained))
     hook.write_text(
         "#!/bin/sh\n# pr-verify guard (installed by `prv install-git-hook`)\n"
@@ -815,10 +795,8 @@ def main(argv=None) -> None:
     st.add_argument("--report")
     st.set_defaults(fn=cmd_stamp)
 
-    g = sub.add_parser("guard", help="hook entry: block pushes without a passing stamp")
-    g.add_argument("--command", help="command text (pi extension); default reads hook JSON on stdin")
-    g.add_argument("--cwd")
-    g.add_argument("--git-pre-push", nargs="*", help="git pre-push mode: remote name and URL")
+    g = sub.add_parser("guard", help="git pre-push hook entry: block pushes without a passing stamp")
+    g.add_argument("git_args", nargs="*", help="remote name and URL, as git passes them")
     g.set_defaults(fn=cmd_guard)
 
     ih = sub.add_parser("install-git-hook", help="install a git pre-push hook in this repository")
@@ -829,7 +807,7 @@ def main(argv=None) -> None:
     command = argv[argv.index("--") + 1 :] if "--" in argv else []
     argv = argv[: argv.index("--")] if "--" in argv else argv
     args = p.parse_args(argv)
-    args.after = command  # not `command`: `guard --command TEXT` is a different option
+    args.after = command
     if getattr(args, "action", None) == "write" and args.cmd == "stamp" and not args.verdict:
         p.error("stamp write needs --verdict")
     args.fn(args)
