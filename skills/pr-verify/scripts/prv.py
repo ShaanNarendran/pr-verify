@@ -224,6 +224,9 @@ def cmd_triage(a) -> None:
     )
     stat = sh(["git", "diff", "--shortstat", base, head])
     refs = sorted({AREA_REFS[a_] for a_ in result["areas"]})
+    d = stamp_dir()
+    d.mkdir(parents=True, exist_ok=True)
+    (d / f"{head}.triage.json").write_text(json.dumps({"tier": result["tier"], "areas": sorted(result["areas"])}))
     out(
         {
             "head": head,
@@ -293,9 +296,32 @@ def _runtime_flags() -> list[str]:
     return ["--privileged"]
 
 
+def _start_docker() -> str | None:
+    """Start an installed but stopped Docker runtime. Returns what was started."""
+    candidates = []
+    if sys.platform == "darwin":
+        for app, label in (("/Applications/Docker.app", "Docker Desktop"), ("/Applications/OrbStack.app", "OrbStack")):
+            if Path(app).exists():
+                candidates.append((["open", "-a", app], label))
+    if shutil.which("colima"):
+        candidates.append((["colima", "start"], "Colima"))
+    for argv, label in candidates:
+        subprocess.run(argv, capture_output=True, timeout=300)
+        for _ in range(60):
+            if ok(["docker", "info"]):
+                return label
+            time.sleep(3)
+    return None
+
+
 def cmd_sandbox(a) -> None:
-    if not shutil.which("docker") or not ok(["docker", "info"]):
-        raise SystemExit("Docker is not running: start Docker Desktop, Colima or OrbStack, then retry")
+    if not shutil.which("docker"):
+        raise SystemExit("Docker is not installed. Stop and ask the user: pr-verify needs Docker for the sandbox.")
+    started = None
+    if not ok(["docker", "info"]):
+        started = _start_docker()
+        if not started:
+            raise SystemExit("Docker is not running and could not be started. Stop and ask the user to start it.")
     name = container_name()
     if a.action == "down":
         _docker("rm", "-f", "-v", name, check=False)
@@ -351,7 +377,7 @@ def cmd_sandbox(a) -> None:
     _docker(*args, IMAGE)
     for _ in range(60):
         if ok(["docker", "exec", name, "docker", "info"]):
-            out({"sandbox": name, "state": "ready", "image": IMAGE, "work": "/work/pr and /work/base"})
+            out({"sandbox": name, "state": "ready", "image": IMAGE, "started_docker": started})
             return
         time.sleep(2)
     raise SystemExit(f"inner Docker did not start; see `docker logs {name}`")
@@ -513,7 +539,10 @@ def cmd_compare(a) -> None:
     base, pr = _junit(a.base), _junit(a.pr)
     if not pr:
         raise SystemExit(f"no JUnit results matched {a.pr}")
-    out(compare_results(base, pr))
+    result = compare_results(base, pr)
+    with contextlib.suppress(SystemExit):
+        (Path(load_run()["run_dir"]) / "compare.json").write_text(json.dumps(result))
+    out(result)
 
 
 @contextlib.contextmanager
@@ -554,6 +583,8 @@ def cmd_mutate(a) -> None:
             "log": result["log"],
         }
     )
+    with open(Path(meta["run_dir"]) / "mutants.jsonl", "a") as fh:
+        fh.write(json.dumps({"label": a.label, "killed": result["exit"] != 0, "killed_by": reason}) + "\n")
 
 
 # ---------------------------------------------------------------- brief and fresh eyes
@@ -641,16 +672,68 @@ def cmd_fresh_eyes(a) -> None:
 # ---------------------------------------------------------------- stamp and guard
 
 
+RISK_ROWS = (
+    "Inputs", "Boundaries", "Permissions", "State", "Concurrency", "Time", "Dependency failure",
+    "Data", "Scale", "Security", "Contracts", "Operations", "Platform",
+)  # fmt: skip
+
+
+def missing_evidence(tier: str, run: Path | None, report: str | None) -> list[str]:
+    """What a pass verdict still lacks. Skip tier needs nothing; a fail verdict needs no proof."""
+    if tier == "skip":
+        return []
+    if run is None or not (run / "run.json").exists():
+        return ["no workspace: run `prv workspace` and verify in the sandbox"]
+    gaps = []
+    text = Path(report).read_text() if report and Path(report).exists() else ""
+    if not text:
+        gaps.append("report: pass --report <run dir>/report.md")
+    elif "<!--" in text:
+        gaps.append("report: template placeholders (<!-- -->) left unfilled")
+    missing_rows = [r for r in RISK_ROWS if r.lower() not in text.lower()]
+    if text and missing_rows:
+        gaps.append("report: no scenario or 'N/A: reason' for checklist rows " + ", ".join(missing_rows))
+    cmp_path = run / "compare.json"
+    if not cmp_path.exists():
+        gaps.append("regression: run `prv compare` on base and PR results")
+    elif json.loads(cmp_path.read_text()).get("verdict") != "pass":
+        gaps.append("regression: `prv compare` found new failures")
+    if tier == "deep":
+        if not (run / "fresh-eyes.md").exists() and "independent review: unavailable" not in text.lower():
+            gaps.append("deep: run `prv fresh-eyes` (or write 'Independent review: unavailable' with the reason)")
+        mutants = (
+            [json.loads(x) for x in (run / "mutants.jsonl").read_text().splitlines()]
+            if (run / "mutants.jsonl").exists()
+            else []
+        )
+        if not mutants:
+            gaps.append("deep: run `prv mutate` on the core lines of the change")
+        elif any(not m["killed"] for m in mutants):
+            gaps.append(
+                "deep: surviving mutants mean missing tests: "
+                + ", ".join(m["label"] for m in mutants if not m["killed"])
+            )
+    return gaps
+
+
 def cmd_stamp(a) -> None:
     sha = a.sha or head_sha()
     d = stamp_dir()
     path = d / f"{sha}.json"
     if a.action == "write":
         d.mkdir(parents=True, exist_ok=True)
+        triage = d / f"{sha}.triage.json"
+        tier = json.loads(triage.read_text())["tier"] if triage.exists() else "deep"  # untriaged: assume the worst
+        if a.verdict == "pass":
+            run = run_dir(sha=sha)
+            gaps = missing_evidence(tier, run if run.exists() else None, a.report)
+            if gaps:
+                out({"sha": sha, "stamped": False, "tier": tier, "missing": gaps})
+                sys.exit(1)
         record = {
             "sha": sha,
             "verdict": a.verdict,
-            "tier": a.tier,
+            "tier": tier,
             "report": a.report,
             "at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         }
@@ -791,7 +874,6 @@ def main(argv=None) -> None:
     st.add_argument("action", choices=["write", "check"])
     st.add_argument("--sha")
     st.add_argument("--verdict", choices=["pass", "fail"])
-    st.add_argument("--tier", default="standard")
     st.add_argument("--report")
     st.set_defaults(fn=cmd_stamp)
 

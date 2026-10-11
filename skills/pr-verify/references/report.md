@@ -39,7 +39,7 @@ Not applicable: <!-- row: reason -->
 
 ## Independent review
 
-<!-- source (Observal agent, isolated pi, or self) and which of its scenarios were run -->
+<!-- source (Observal agent or isolated pi) and which of its scenarios were run; if none could run, write "Independent review: unavailable" and why -->
 
 ## Gaps
 

@@ -15,10 +15,10 @@ Find what breaks. Evidence or it didn't happen.
 
 1. **Triage.** Run `prv triage` (add `--base REF` if the base is unusual).
    - `git_hook: false`: run `prv install-git-hook` once. From then on every `git push` in this repository, by anyone or any agent, is blocked until the commit passes. An existing pre-push hook is kept and chained.
-   - `tier: skip`: run `prv stamp write --verdict pass --tier skip` and stop.
+   - `tier: skip`: run `prv stamp write --verdict pass` and stop.
    - Otherwise read `references/qa-method.md` plus each file in `read`. Nothing else yet.
 2. **Workspace and sandbox.**
-   - Run `prv workspace`, then `prv sandbox up`.
+   - Run `prv workspace`, then `prv sandbox up`. It starts Docker if Docker is installed but stopped. If it still fails, stop and ask the user. Never fall back to running the project on the host.
    - Install dependencies the way the repository does: `prv ci-steps` shows the devcontainer, CI, Makefile and toolchain files. Replay them with `prv run setup-<n> --in pr -- <cmd>`, and the same with `--in base`. Run `mise install` first when there are toolchain files. Build or pull every image the stack needs.
    - Install everything the test commands need before going offline, including runner plugins (parallel, JUnit, coverage). CI's test command lists them.
    - Run `prv sandbox offline` before testing.
@@ -26,7 +26,7 @@ Find what breaks. Evidence or it didn't happen.
 3. **Claims and impact.** Run `prv brief` to write `brief.md`. Turn it into the claims table in `report.md` (the path printed by `prv workspace`). Map changed code to its entry points (method §1–2).
 4. **Plan.**
    - Walk the risk checklist and the area files. Every row becomes scenarios or "N/A: reason".
-   - Deep tier: run `prv fresh-eyes`. It delegates to an independent reviewer: the Observal agent named in `PR_VERIFY_REVIEWER`, otherwise an isolated headless pi on the current model (`PR_VERIFY_MODEL` overrides). Merge its scenarios and attacks into the plan, and verify each one before reporting it.
+   - Deep tier: run `prv fresh-eyes` (it needs no Docker). It delegates to an independent reviewer: the Observal agent named in `PR_VERIFY_REVIEWER`, otherwise an isolated headless pi on the current model (`PR_VERIFY_MODEL` overrides). Merge its scenarios and attacks into the plan, and verify each one before reporting it.
 5. **Execute end to end.** Start the real stack inside the sandbox, drive it through its entry points, and assert on the resulting state as well as responses. Record every scenario in `report.md` as you go.
 6. **Prove.**
    - Add tests in the repository's own framework for each claim and each bug.
@@ -41,7 +41,8 @@ Find what breaks. Evidence or it didn't happen.
    - Only new failures caused by the change block.
 9. **Report and stamp.**
    - Finish `report.md` and set the verdict.
-   - Run `prv stamp write --verdict pass|fail --tier <tier> --report <path>`, then `prv sandbox down`.
+   - Run `prv stamp write --verdict pass|fail --report <path>`, then `prv sandbox down`.
+   - A pass has to be earned. The stamp refuses it until the evidence exists: a filled report covering every checklist row, `prv compare`, and on deep runs `prv fresh-eyes` plus `prv mutate` with no survivors. If it refuses, do what `missing` lists; don't work around it.
    - Tell the user the verdict, the blocking findings with repro steps, the gaps, and the report path.
 
 ## Rules

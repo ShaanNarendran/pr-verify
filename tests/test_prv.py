@@ -133,6 +133,71 @@ class TestCiSteps(unittest.TestCase):
         self.assertEqual(prv._run_blocks(yaml), ["uv sync", "make lint && make test", "pytest tests -n auto"])
 
 
+class TestPassMustBeEarned(RepoCase):
+    """A passing stamp unblocks a push, so it requires the evidence the method promises."""
+
+    FULL = "\n".join(f"| {row} | scenario or N/A: reason |" for row in prv.RISK_ROWS)
+
+    def run_dir_with(self, report=None, compare=None, fresh=False, mutants=()):
+        run = self.tmp / "run"
+        run.mkdir(exist_ok=True)
+        (run / "run.json").write_text("{}")
+        if report is not None:
+            (run / "report.md").write_text(report)
+        if compare is not None:
+            (run / "compare.json").write_text(json.dumps({"verdict": compare}))
+        if fresh:
+            (run / "fresh-eyes.md").write_text("## Scenarios")
+        if mutants:
+            (run / "mutants.jsonl").write_text("".join(json.dumps(m) + "\n" for m in mutants))
+        return run, str(run / "report.md")
+
+    def test_evidence_rules(self):
+        self.assertEqual(prv.missing_evidence("skip", None, None), [])
+        self.assertIn("no workspace", prv.missing_evidence("standard", None, None)[0])
+
+        run, rep = self.run_dir_with(report="<!-- HEAD sha -->\n" + self.FULL, compare="pass")
+        self.assertTrue(any("placeholders" in g for g in prv.missing_evidence("standard", run, rep)))
+
+        run, rep = self.run_dir_with(report="| Inputs | x |", compare="pass")
+        gaps = prv.missing_evidence("standard", run, rep)
+        self.assertTrue(any("Boundaries" in g and "Permissions" in g for g in gaps), gaps)
+
+        run, rep = self.run_dir_with(report=self.FULL, compare="fail")
+        self.assertTrue(any("new failures" in g for g in prv.missing_evidence("standard", run, rep)))
+
+        run, rep = self.run_dir_with(report=self.FULL, compare="pass")
+        self.assertEqual(prv.missing_evidence("standard", run, rep), [])
+        deep = prv.missing_evidence("deep", run, rep)
+        self.assertTrue(any("fresh-eyes" in g for g in deep) and any("mutate" in g for g in deep), deep)
+
+        run, rep = self.run_dir_with(
+            report=self.FULL, compare="pass", fresh=True, mutants=[{"label": "m1", "killed": False}]
+        )
+        self.assertTrue(any("surviving mutants" in g and "m1" in g for g in prv.missing_evidence("deep", run, rep)))
+
+        run, rep = self.run_dir_with(
+            report=self.FULL, compare="pass", fresh=True, mutants=[{"label": "m1", "killed": True}]
+        )
+        self.assertEqual(prv.missing_evidence("deep", run, rep), [])
+
+    def test_stamp_cli_refuses_an_unearned_pass_but_records_a_fail(self):
+        sha = self.commit("app.py", "def f():\n    return 2\n")
+        cwd = os.getcwd()
+        os.chdir(self.repo)
+        try:
+            with redirect_stdout(io.StringIO()) as buf, self.assertRaises(SystemExit) as exc:
+                prv.main(["stamp", "write", "--verdict", "pass"])  # never triaged: treated as deep, no evidence
+            self.assertEqual(exc.exception.code, 1)
+            self.assertIn('"stamped":false', buf.getvalue())
+            self.assertFalse((prv.stamp_dir() / f"{sha}.json").exists())
+            with redirect_stdout(io.StringIO()):
+                prv.main(["stamp", "write", "--verdict", "fail"])
+            self.assertEqual(json.loads((prv.stamp_dir() / f"{sha}.json").read_text())["verdict"], "fail")
+        finally:
+            os.chdir(cwd)
+
+
 class TestGitHookGuard(RepoCase):
     """The guard as it ships: a git pre-push hook, exercised with real pushes to a bare remote."""
 

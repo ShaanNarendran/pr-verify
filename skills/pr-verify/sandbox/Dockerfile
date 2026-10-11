@@ -2,13 +2,14 @@
 # pr-verify sandbox: a disposable box with its own Docker daemon, so a PR's compose stack runs isolated
 # from the host. Toolchains install on demand (mise reads .tool-versions, .nvmrc, .python-version, go.mod ...)
 # into the /cache volume, so the image stays small and repeat runs reuse them.
+# The box is disposable, so CI's plain `pip install` may write to the system Python.
 FROM ubuntu:24.04
 
 ARG DEBIAN_FRONTEND=noninteractive
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       ca-certificates curl gnupg git jq make build-essential pkg-config unzip xz-utils zip \
-      python3 python3-venv python3-pip sqlite3 iproute2 iptables procps less openssh-client \
+      python3 python3-venv python3-pip python-is-python3 sqlite3 iproute2 iptables procps less openssh-client \
  && install -m 0755 -d /etc/apt/keyrings \
  && curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc \
  && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu noble stable" \
@@ -36,7 +37,8 @@ ENV PATH=/root/.local/bin:/cache/mise/shims:$PATH \
     CARGO_HOME=/cache/cargo \
     PLAYWRIGHT_BROWSERS_PATH=/cache/ms-playwright \
     XDG_CACHE_HOME=/cache/xdg \
-    CI=true
+    CI=true \
+    PIP_BREAK_SYSTEM_PACKAGES=1
 
 COPY entrypoint.sh /usr/local/bin/pr-verify-entrypoint
 RUN chmod +x /usr/local/bin/pr-verify-entrypoint
