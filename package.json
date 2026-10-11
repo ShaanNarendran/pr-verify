@@ -1,0 +1,14 @@
+{
+  "name": "pr-verify",
+  "version": "0.1.0",
+  "description": "Senior-QA style end-to-end verification of a pull request in a disposable Docker sandbox, with a guard that blocks pushes until the commit is verified.",
+  "keywords": ["pi-package", "qa", "testing", "pull-request", "sandbox"],
+  "license": "Apache-2.0",
+  "pi": {
+    "skills": ["./skills"],
+    "extensions": ["./extensions"]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  }
+}

@@ -1,0 +1,20 @@
+{
+  "name": "pr-verify-guard",
+  "version": "0.1.0",
+  "description": "Blocks git push and gh pr create until the commit has passed pr-verify. Override with PR_VERIFY_SKIP=\"<reason>\" (logged).",
+  "event": "PreToolUse",
+  "execution_mode": "blocking",
+  "handler_type": "command",
+  "handler_config": {
+    "timeout": 30
+  },
+  "scope": "agent",
+  "tool_filter": [
+    "Bash"
+  ],
+  "supported_harnesses": [
+    "claude-code"
+  ],
+  "script_content": "#!/bin/sh\n# SPDX-License-Identifier: Apache-2.0\n# PreToolUse hook: find the installed pr-verify skill and let its guard decide. Reads the hook JSON on stdin.\n# Skill locations come from Observal's harness registry (project scope first, then user scope).\nfor d in \"$PR_VERIFY_SKILL_DIR\" \\\n  .claude/skills/pr-verify \"$HOME/.claude/skills/pr-verify\" \\\n  .agents/skills/pr-verify \"$HOME/.agents/skills/pr-verify\" \\\n  .cursor/skills/pr-verify \"$HOME/.cursor/skills/pr-verify\" \\\n  .kiro/skills/pr-verify \"$HOME/.kiro/skills/pr-verify\" \\\n  .github/skills/pr-verify \"$HOME/.copilot/skills/pr-verify\" \\\n  .opencode/skills/pr-verify \"$HOME/.config/opencode/skills/pr-verify\" \\\n  \"$HOME/.gemini/antigravity-cli/skills/pr-verify\" \\\n  .pi/skills/pr-verify \"$HOME/.pi/agent/skills/pr-verify\"; do\n  if [ -n \"$d\" ] && [ -f \"$d/scripts/prv.py\" ]; then\n    exec python3 \"$d/scripts/prv.py\" guard\n  fi\ndone\n# A quality gate, not a security boundary: without the skill there is nothing to check against.\necho \"pr-verify guard: skill not installed, push not checked\" >&2\nexit 0\n",
+  "script_filename": "pr-verify-guard.sh"
+}
