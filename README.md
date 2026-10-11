@@ -93,7 +93,7 @@ The guard is a plain git `pre-push` hook (`prv install-git-hook`). Because git r
 Push this repository to GitHub, then submit the one skill:
 
 ```bash
-observal registry skill submit --skill-md skills/pr-verify/SKILL.md --git-url https://github.com/OWNER/pr-verify \
+observal registry skill submit --skill-md skills/pr-verify/SKILL.md --git-url https://github.com/ShaanNarendran/pr-verify \
   --git-ref main --skill-path skills/pr-verify --name pr-verify --task-type testing \
   --description "Senior-QA end-to-end verification of a PR in a Docker sandbox; blocks pushes until verified." --output json
 ```
