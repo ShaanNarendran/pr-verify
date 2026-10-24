@@ -1,6 +1,6 @@
 ---
 name: pr-verify
-description: Verifies a branch or pull request end to end like a senior QA engineer before it is pushed or opened. Builds the change and its base in a disposable Docker sandbox with the project's real dependencies, designs risk-based tests (edge cases, permissions, concurrency, time, failures, upgrade paths, security), proves new tests fail on base and pass on the change, red-teams the fix, and diffs the full test suite against base. Use before `git push` or `gh pr create`, when a push is blocked by pr-verify, or when asked to verify, QA or test a PR, branch or fix.
+description: Reviews a pull request, branch, commit or diff end to end like a senior QA engineer before it is pushed or opened. Use whenever the user says review, code review, "review this PR/branch/commit/diff", verify, QA or test a change, before `git push` or `gh pr create`, or when a push is blocked by pr-verify. Builds the change and its base in a disposable Docker sandbox with the project's real dependencies, designs risk-based tests (edge cases, permissions, concurrency, time, failures, upgrade paths, security), proves new tests fail on base and pass on the change, red-teams the fix, and diffs the full test suite against base.
 license: Apache-2.0
 compatibility: Needs git, python3 and a running Docker daemon (Docker Desktop, Colima, OrbStack or Linux Docker). Optional gh (exact PR base), observal or pi (independent reviewer).
 ---
